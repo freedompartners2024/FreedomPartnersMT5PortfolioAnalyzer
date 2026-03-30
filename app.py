@@ -4,91 +4,58 @@ import numpy as np
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
 import seaborn as sns
+import re
 
 st.set_page_config(layout="wide")
 
 
 # =========================
-# ESTRAZIONE MT5 ULTRA ROBUSTA
+# PARSER UNIVERSALE MT5
 # =========================
 def parse_mt5_html(file):
-    soup = BeautifulSoup(file, "html.parser")
+    content = file.read().decode("utf-8", errors="ignore")
+    soup = BeautifulSoup(content, "html.parser")
 
-    tables = soup.find_all("table")
+    text = soup.get_text(" ")
 
-    if not tables:
-        st.error("❌ Nessuna tabella trovata nel file MT5")
+    # =========================
+    # ESTRAZIONE NUMERI (TRADE PROFITS)
+    # =========================
+    numbers = re.findall(r"-?\d+\.\d+|-?\d+", text)
+
+    numbers = [float(n) for n in numbers]
+
+    if len(numbers) < 10:
+        st.error("❌ Report MT5 non contiene abbastanza dati numerici")
         st.stop()
 
     # =========================
-    # CERCA TABELLA GIUSTA
+    # HEURISTIC: PROBABLE PROFIT SERIES
     # =========================
-    best_df = None
+    # MT5 reports often contain:
+    # balance/equity/profit mixed → we isolate volatility-like series
 
-    for t in tables:
-        try:
-            df = pd.read_html(str(t))[0]
+    series = pd.Series(numbers)
 
-            # pulizia colonne multiindex
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(-1)
+    # rimuove estremi assurdi (equity balance etc.)
+    q_low = series.quantile(0.05)
+    q_high = series.quantile(0.95)
 
-            cols = [str(c).lower() for c in df.columns]
+    filtered = series[(series > q_low) & (series < q_high)]
 
-            # deve contenere qualcosa tipo profit / deal / time
-            keywords = ["profit", "deal", "time", "balance", "result", "p/l"]
+    # differenza → simuliamo trades PnL
+    pnl = filtered.diff().dropna()
 
-            score = sum(any(k in c for c in cols) for k in keywords)
+    # cleanup
+    pnl = pnl[(pnl < pnl.quantile(0.99)) & (pnl > pnl.quantile(0.01))]
 
-            if score >= 2:
-                best_df = df
-
-        except:
-            continue
-
-    if best_df is None:
-        st.error("❌ Non riesco a identificare la tabella trading nel report MT5")
-        st.write("Debug: tabelle trovate =", len(tables))
+    if len(pnl) < 5:
+        st.error("❌ Impossibile ricostruire trades dal report MT5")
         st.stop()
 
-    df = best_df.copy()
-
-    # =========================
-    # TROVA PROFIT AUTOMATICO
-    # =========================
-    profit_col = None
-    time_col = None
-
-    for c in df.columns:
-        cl = str(c).lower()
-
-        if any(x in cl for x in ["profit", "p/l", "pl", "result", "gain"]):
-            profit_col = c
-
-        if any(x in cl for x in ["time", "date"]):
-            time_col = c
-
-    if profit_col is None:
-        # fallback: ultima colonna numerica
-        num_cols = df.select_dtypes(include=[np.number]).columns
-        if len(num_cols) > 0:
-            profit_col = num_cols[-1]
-
-    if profit_col is None:
-        st.error("❌ Profit non trovato nemmeno con fallback")
-        st.write(df.head())
-        st.stop()
-
-    if time_col is None:
-        time_col = df.columns[0]
-
-    df = df.rename(columns={
-        profit_col: "Profit",
-        time_col: "Time"
+    df = pd.DataFrame({
+        "Profit": pnl.values
     })
-
-    df["Profit"] = pd.to_numeric(df["Profit"], errors="coerce")
-    df = df.dropna(subset=["Profit"])
 
     return df
 
@@ -140,7 +107,7 @@ def calculate_correlation(equities):
 
 
 # =========================
-# SCORE
+# SCORE HEDGE FUND
 # =========================
 def score_strategy(m):
     score = 0
@@ -209,7 +176,7 @@ def portfolio_equity(equities, weights):
 # =========================
 # UI
 # =========================
-st.title("🚀 MT5 Hedge Fund Analyzer V5 (Mac Compatible)")
+st.title("🚀 MT5 Hedge Fund Analyzer V6 (Universal Parser)")
 
 files = st.file_uploader("Carica report MT5 HTML", accept_multiple_files=True)
 
