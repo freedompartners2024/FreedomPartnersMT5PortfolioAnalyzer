@@ -7,71 +7,87 @@ import seaborn as sns
 
 st.set_page_config(layout="wide")
 
+
 # =========================
-# PARSER ROBUSTO MT5
+# ESTRAZIONE MT5 ULTRA ROBUSTA
 # =========================
 def parse_mt5_html(file):
     soup = BeautifulSoup(file, "html.parser")
+
     tables = soup.find_all("table")
 
-    df = pd.read_html(str(tables))[0]
-
-    # MultiIndex fix
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(-1)
-
-    df = df.dropna(how="all")
-
-    cols = [str(c).lower() for c in df.columns]
+    if not tables:
+        st.error("❌ Nessuna tabella trovata nel file MT5")
+        st.stop()
 
     # =========================
-    # PROFIT COLUMN DETECTION
+    # CERCA TABELLA GIUSTA
     # =========================
-    profit_candidates = [
-        "profit", "p/l", "pl", "gain", "net profit", "profit/loss", "result"
-    ]
+    best_df = None
 
+    for t in tables:
+        try:
+            df = pd.read_html(str(t))[0]
+
+            # pulizia colonne multiindex
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(-1)
+
+            cols = [str(c).lower() for c in df.columns]
+
+            # deve contenere qualcosa tipo profit / deal / time
+            keywords = ["profit", "deal", "time", "balance", "result", "p/l"]
+
+            score = sum(any(k in c for c in cols) for k in keywords)
+
+            if score >= 2:
+                best_df = df
+
+        except:
+            continue
+
+    if best_df is None:
+        st.error("❌ Non riesco a identificare la tabella trading nel report MT5")
+        st.write("Debug: tabelle trovate =", len(tables))
+        st.stop()
+
+    df = best_df.copy()
+
+    # =========================
+    # TROVA PROFIT AUTOMATICO
+    # =========================
     profit_col = None
-    for p in profit_candidates:
-        for c in df.columns:
-            if p in str(c).lower():
-                profit_col = c
-                break
-        if profit_col is not None:
-            break
+    time_col = None
+
+    for c in df.columns:
+        cl = str(c).lower()
+
+        if any(x in cl for x in ["profit", "p/l", "pl", "result", "gain"]):
+            profit_col = c
+
+        if any(x in cl for x in ["time", "date"]):
+            time_col = c
 
     if profit_col is None:
-        st.error("❌ Nessuna colonna profit trovata nel file MT5")
-        st.write("Colonne disponibili:", df.columns)
+        # fallback: ultima colonna numerica
+        num_cols = df.select_dtypes(include=[np.number]).columns
+        if len(num_cols) > 0:
+            profit_col = num_cols[-1]
+
+    if profit_col is None:
+        st.error("❌ Profit non trovato nemmeno con fallback")
+        st.write(df.head())
         st.stop()
-
-    # =========================
-    # TIME COLUMN DETECTION
-    # =========================
-    time_candidates = ["time", "date", "open time", "close time"]
-
-    time_col = None
-    for t in time_candidates:
-        for c in df.columns:
-            if t in str(c).lower():
-                time_col = c
-                break
-        if time_col is not None:
-            break
 
     if time_col is None:
-        st.error("❌ Nessuna colonna time trovata nel file MT5")
-        st.write("Colonne disponibili:", df.columns)
-        st.stop()
-
-    df[profit_col] = pd.to_numeric(df[profit_col], errors="coerce")
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+        time_col = df.columns[0]
 
     df = df.rename(columns={
         profit_col: "Profit",
         time_col: "Time"
     })
 
+    df["Profit"] = pd.to_numeric(df["Profit"], errors="coerce")
     df = df.dropna(subset=["Profit"])
 
     return df
@@ -124,7 +140,7 @@ def calculate_correlation(equities):
 
 
 # =========================
-# SCORE HEDGE FUND
+# SCORE
 # =========================
 def score_strategy(m):
     score = 0
@@ -172,7 +188,6 @@ def build_portfolio(metrics_list, corr, names):
             final.append((name, m, s))
 
     total_score = sum([f[2] for f in final]) if final else 1
-
     weights = {f[0]: f[2] / total_score for f in final}
 
     return final, weights
@@ -194,7 +209,7 @@ def portfolio_equity(equities, weights):
 # =========================
 # UI
 # =========================
-st.title("🚀 Hedge Fund Portfolio Analyzer V4 (Stable)")
+st.title("🚀 MT5 Hedge Fund Analyzer V5 (Mac Compatible)")
 
 files = st.file_uploader("Carica report MT5 HTML", accept_multiple_files=True)
 
