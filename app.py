@@ -45,18 +45,14 @@ def calculate_metrics(df):
 
     stagnation = (~(equity.cummax() == equity)).sum()
 
-    df['Month'] = df['Time'].dt.to_period('M')
-    monthly = df.groupby('Month')['Profit'].sum()
-
     return {
-        "Profit Factor": pf,
-        "Win Rate": winrate,
-        "RR": rr,
-        "Max DD": dd,
-        "Sharpe": sharpe,
-        "Stagnation": stagnation,
-        "Equity": equity,
-        "Monthly": monthly
+        "pf": pf,
+        "winrate": winrate,
+        "rr": rr,
+        "dd": dd,
+        "sharpe": sharpe,
+        "stagnation": stagnation,
+        "equity": equity
     }
 
 # =========================
@@ -68,89 +64,94 @@ def calculate_correlation(equities):
     return returns.corr()
 
 # =========================
-# MONTE CARLO
+# SCORING (HEDGE FUND STYLE)
 # =========================
-def monte_carlo(profits, simulations=200):
-    results = []
-    for _ in range(simulations):
-        shuffled = np.random.permutation(profits)
-        equity = np.cumsum(shuffled)
-        results.append(equity[-1])
-    return results
+def score_strategy(m):
+    score = 0
 
-# =========================
-# OPTIMIZER
-# =========================
-def optimize_portfolio(equities, trials=1000):
-    combined = pd.DataFrame(equities).fillna(0)
-    returns = combined.diff().fillna(0)
+    if m['pf'] > 1.5: score += 20
+    elif m['pf'] > 1.3: score += 10
 
-    best_score = -np.inf
-    best_weights = None
+    if m['sharpe'] > 1: score += 20
+    elif m['sharpe'] > 0.5: score += 10
 
-    for _ in range(trials):
-        weights = np.random.random(len(combined.columns))
-        weights /= weights.sum()
+    if abs(m['dd']) < 10: score += 20
+    elif abs(m['dd']) < 20: score += 10
 
-        portfolio_returns = returns.dot(weights)
-        equity = portfolio_returns.cumsum()
+    if m['stagnation'] < 50: score += 20
+    elif m['stagnation'] < 100: score += 10
 
-        dd = (equity - equity.cummax()).min()
-        profit = equity.iloc[-1]
+    if m['rr'] > 1.2: score += 20
 
-        score = profit + dd
-
-        if score > best_score:
-            best_score = score
-            best_weights = weights
-
-    return best_weights
+    return score
 
 # =========================
-# AI BUILDER
+# AUTO BUILDER (VERO)
 # =========================
-def auto_builder(metrics_list, corr, names):
+def build_portfolio(metrics_list, corr, names):
+
     selected = []
-    weights = []
+    scores = []
 
+    # STEP 1: score singole strategie
     for i, m in enumerate(metrics_list):
-        if m['Profit Factor'] > 1.3 and m['Sharpe'] > 0.3:
-            selected.append(names[i])
+        s = score_strategy(m)
+        scores.append(s)
 
-    return selected
+        if s >= 50:
+            selected.append((names[i], m, s))
+
+    # STEP 2: riduzione correlazione
+    final = []
+    for i, (name, m, s) in enumerate(selected):
+        keep = True
+        for f in final:
+            if corr.loc[name, f[0]] > 0.7:
+                keep = False
+        if keep:
+            final.append((name, m, s))
+
+    # STEP 3: pesi proporzionali al punteggio
+    total_score = sum([f[2] for f in final])
+
+    weights = {}
+    for f in final:
+        weights[f[0]] = f[2] / total_score
+
+    return final, weights
+
+# =========================
+# PORTFOLIO EQUITY
+# =========================
+def portfolio_equity(equities, weights):
+    df = pd.DataFrame(equities).fillna(0)
+    returns = df.diff().fillna(0)
+
+    w = np.array([weights[k] for k in df.columns])
+    port = returns.dot(w)
+
+    return port.cumsum()
 
 # =========================
 # UI
 # =========================
-st.title("🚀 MT5 Portfolio Analyzer AI")
+st.title("🚀 Hedge Fund Portfolio Builder")
 
 files = st.file_uploader("Carica report MT5 HTML", accept_multiple_files=True)
 
 if files:
     metrics_list = []
     equities = {}
-    combined_equity = None
 
     for file in files:
         df = parse_mt5_html(file)
-        metrics = calculate_metrics(df)
-        metrics_list.append(metrics)
+        m = calculate_metrics(df)
 
-        equity = metrics['Equity']
-        equities[file.name] = equity
-
-        if combined_equity is None:
-            combined_equity = equity
-        else:
-            combined_equity = combined_equity.add(equity, fill_value=0)
+        metrics_list.append(m)
+        equities[file.name] = m['equity']
 
         st.subheader(file.name)
-        st.write({k:v for k,v in metrics.items() if k not in ['Equity','Monthly']})
-        st.line_chart(equity)
-        st.bar_chart(metrics['Monthly'])
-
-    st.subheader("📈 Portfolio")
-    st.line_chart(combined_equity)
+        st.write(m)
 
     corr = calculate_correlation(equities)
 
@@ -161,21 +162,35 @@ if files:
     sns.heatmap(corr, annot=True, ax=ax)
     st.pyplot(fig)
 
-    all_profits = np.concatenate([m['Equity'].diff().fillna(0).values for m in metrics_list])
-    mc = monte_carlo(all_profits)
+    st.subheader("🤖 Costruzione Portfolio Automatica")
 
-    st.subheader("🎲 Monte Carlo")
-    st.bar_chart(mc)
-
-    st.subheader("⚖️ Ottimizzazione")
-    if st.button("Ottimizza"):
-        weights = optimize_portfolio(equities)
-        for i, name in enumerate(equities.keys()):
-            st.write(f"{name}: {weights[i]*100:.2f}%")
-
-    st.subheader("🤖 Auto Portfolio Builder")
     names = list(equities.keys())
-    selected = auto_builder(metrics_list, corr, names)
+    final, weights = build_portfolio(metrics_list, corr, names)
 
-    for s in selected:
-        st.write(f"✅ {s}")
+    st.write("Strategie selezionate:")
+
+    for f in final:
+        st.write(f"✅ {f[0]} | Score: {f[2]}")
+
+    st.write("Allocazione capitale:")
+
+    for k, v in weights.items():
+        st.write(f"{k}: {v*100:.2f}%")
+
+    peq = portfolio_equity(equities, weights)
+
+    st.subheader("📈 Equity Finale")
+    st.line_chart(peq)
+
+    # SCORE FINALE
+    total_score = np.mean([f[2] for f in final])
+
+    st.subheader("🏆 Score Portafoglio")
+    st.metric("Score", f"{total_score:.1f}/100")
+
+    if total_score > 75:
+        st.success("Portafoglio forte (livello hedge fund)")
+    elif total_score > 60:
+        st.warning("Portafoglio buono ma migliorabile")
+    else:
+        st.error("Portafoglio debole, da rivedere")
