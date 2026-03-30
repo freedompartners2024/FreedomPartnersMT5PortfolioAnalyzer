@@ -1,0 +1,1 @@
+# FreedomPartnersMT5PortfolioAnalyzer
